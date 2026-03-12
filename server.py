@@ -308,13 +308,24 @@ async def health_check(request) -> dict:
 # ─── Entry Point ──────────────────────────────────────────────────────────────
 
 if __name__ == "__main__":
-    import sys
-    import os
+    api_key = os.environ.get("API_KEY")
+    if not api_key:
+        raise RuntimeError("API_KEY environment variable is not set. Refusing to start without auth.")
 
-    transport = sys.argv[1] if len(sys.argv) > 1 else "stdio"
+    from starlette.applications import Starlette
+    from starlette.middleware import Middleware
+    from starlette.routing import Mount
+
+    # Instead of wrapping FastMCP's app externally (which causes the 502),
+    # we mount FastMCP inside a Starlette app and attach our middleware there.
+    # Starlette knows how to wire middleware into the request lifecycle correctly,
+    # whereas our manual ASGI wrapper was intercepting the request but then
+    # handing it to FastMCP in a way that caused it to hang without responding.
+    protected_app = Starlette(
+        routes=[Mount("/", app=mcp.streamable_http_app())],
+        middleware=[Middleware(ApiKeyMiddleware, api_key=api_key)]
+    )
+
+    import uvicorn
     port = int(os.environ.get("PORT", 8000))
-
-    if transport == "http":
-        mcp.run(transport="streamable_http", port=port)
-    else:
-        mcp.run()
+    uvicorn.run(protected_app, host="0.0.0.0", port=port)
