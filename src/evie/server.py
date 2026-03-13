@@ -8,7 +8,7 @@ Thin query layer over Supabase — no PDF processing, no ML, no Docling.
 import os
 
 from fastmcp import FastMCP
-from starlette.responses import JSONResponse, RedirectResponse
+from starlette.responses import HTMLResponse, JSONResponse, RedirectResponse
 
 from . import _state
 from .oauth import SupabaseOAuthProvider
@@ -67,35 +67,70 @@ async def health_check(request):
     return JSONResponse({"status": "ok", "server": "evie_mcp"})
 
 
-# ─── OAuth callback from Supabase ────────────────────────────────────────────
+# ─── Login page (email/password) ─────────────────────────────────────────────
 
-@mcp.custom_route("/oauth/callback", methods=["GET"])
-async def oauth_callback(request):
-    """Handle redirect from Supabase after user authenticates.
+_LOGIN_HTML = """<!DOCTYPE html>
+<html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
+<title>EVIE — Sign In</title>
+<style>
+  body { font-family: -apple-system, system-ui, sans-serif; background: #0f172a;
+         color: #e2e8f0; display: flex; justify-content: center; align-items: center;
+         min-height: 100vh; margin: 0; }
+  .card { background: #1e293b; border-radius: 12px; padding: 2rem; width: 100%%;
+          max-width: 380px; box-shadow: 0 4px 24px rgba(0,0,0,0.3); }
+  h1 { font-size: 1.25rem; margin: 0 0 0.25rem; }
+  p { color: #94a3b8; font-size: 0.875rem; margin: 0 0 1.5rem; }
+  label { display: block; font-size: 0.875rem; margin-bottom: 0.25rem; color: #cbd5e1; }
+  input { width: 100%%; padding: 0.5rem 0.75rem; border: 1px solid #334155;
+          border-radius: 6px; background: #0f172a; color: #e2e8f0;
+          font-size: 0.875rem; margin-bottom: 1rem; box-sizing: border-box; }
+  button { width: 100%%; padding: 0.625rem; background: #3b82f6; color: #fff;
+           border: none; border-radius: 6px; font-size: 0.875rem; cursor: pointer; }
+  button:hover { background: #2563eb; }
+  .error { color: #f87171; font-size: 0.8rem; margin-bottom: 1rem; }
+</style></head>
+<body><div class="card">
+  <h1>EVIE — Clinical Evidence</h1>
+  <p>Sign in to connect with Claude</p>
+  %s
+  <form method="POST" action="/login">
+    <input type="hidden" name="state" value="%s">
+    <label for="email">Email</label>
+    <input type="email" id="email" name="email" required>
+    <label for="password">Password</label>
+    <input type="password" id="password" name="password" required>
+    <button type="submit">Sign In</button>
+  </form>
+</div></body></html>"""
 
-    Supabase redirects here with either an authorization code or tokens.
-    We exchange them and redirect back to Claude.ai with our own auth code.
-    """
+
+@mcp.custom_route("/login", methods=["GET"])
+async def login_page(request):
+    """Show the login form."""
+    state = request.query_params.get("state", "")
+    return HTMLResponse(_LOGIN_HTML % ("", state))
+
+
+@mcp.custom_route("/login", methods=["POST"])
+async def login_submit(request):
+    """Handle login form submission."""
     provider = _state.oauth_provider
     if not provider:
         return JSONResponse({"error": "Auth not configured"}, status_code=500)
 
-    params = request.query_params
-    code = params.get("code")
-    state = params.get("state")
-    access_token = params.get("access_token")
-    refresh_token = params.get("refresh_token")
+    form = await request.form()
+    state = form.get("state", "")
+    email = form.get("email", "")
+    password = form.get("password", "")
 
     try:
-        redirect_url = await provider.handle_supabase_callback(
-            code=code,
-            state=state,
-            access_token=access_token,
-            refresh_token=refresh_token,
+        redirect_url = await provider.handle_email_login(
+            state=state, email=email, password=password,
         )
-        return RedirectResponse(redirect_url)
+        return RedirectResponse(redirect_url, status_code=303)
     except ValueError as e:
-        return JSONResponse({"error": str(e)}, status_code=400)
+        error_html = '<div class="error">%s</div>' % str(e)
+        return HTMLResponse(_LOGIN_HTML % (error_html, state), status_code=400)
 
 
 # ─── Well-known MCP server card ──────────────────────────────────────────────

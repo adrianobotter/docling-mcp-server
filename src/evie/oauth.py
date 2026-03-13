@@ -116,11 +116,11 @@ class SupabaseOAuthProvider(OAuthProvider):
     async def authorize(
         self, client: OAuthClientInformationFull, params: AuthorizationParams
     ) -> str:
-        """Redirect to Supabase OAuth login.
+        """Redirect to EVIE's own login page for email/password auth.
 
         We store the MCP authorization params, then redirect the user to
-        Supabase's /authorize endpoint. After login, Supabase redirects
-        back to our /oauth/callback.
+        our /login page. After successful login, we issue an auth code
+        and redirect back to Claude.ai.
         """
         supabase_state = secrets.token_urlsafe(32)
 
@@ -133,52 +133,37 @@ class SupabaseOAuthProvider(OAuthProvider):
             supabase_state=supabase_state,
         )
 
-        # Redirect to Supabase OAuth
-        callback_url = f"{self._base_url_str}/oauth/callback"
-        supabase_params = urlencode({
-            "provider": "email",  # Supabase email/password as default
-            "redirect_to": callback_url,
-            "state": supabase_state,
-        })
-        return f"{self.supabase_url}/auth/v1/authorize?{supabase_params}"
+        # Redirect to our own login page
+        login_params = urlencode({"state": supabase_state})
+        return f"{self._base_url_str}/login?{login_params}"
 
-    # ── Callback from Supabase ───────────────────────────────────────────────
+    # ── Email/password login via Supabase ────────────────────────────────────
 
-    async def handle_supabase_callback(
-        self, code: str | None, state: str | None, access_token: str | None,
-        refresh_token: str | None,
-    ) -> str:
-        """Handle the redirect back from Supabase after user authenticates.
-
-        Supabase can return tokens in two ways:
-        1. Authorization code flow: returns code in query params
-        2. Implicit/PKCE flow: returns tokens in URL fragment (handled client-side)
+    async def handle_email_login(self, state: str, email: str, password: str) -> str:
+        """Authenticate with Supabase email/password and issue an auth code.
 
         Returns the redirect URL to send the user back to Claude.ai.
+        Raises ValueError on invalid state or failed authentication.
         """
-        pending = self._pending.pop(state, None) if state else None
+        pending = self._pending.pop(state, None)
         if not pending:
             raise ValueError("Invalid or expired OAuth state")
 
-        # If we got a Supabase auth code, exchange it for tokens
-        if code and not access_token:
-            async with httpx.AsyncClient() as client:
-                resp = await client.post(
-                    f"{self.supabase_url}/auth/v1/token?grant_type=authorization_code",
-                    json={"code": code},
-                    headers={
-                        "apikey": self.supabase_anon_key,
-                        "Content-Type": "application/json",
-                    },
-                )
-                if resp.status_code != 200:
-                    raise ValueError(f"Supabase token exchange failed: {resp.text}")
-                token_data = resp.json()
-                access_token = token_data["access_token"]
-                refresh_token = token_data.get("refresh_token", "")
-
-        if not access_token:
-            raise ValueError("No access token received from Supabase")
+        # Authenticate with Supabase
+        async with httpx.AsyncClient() as client:
+            resp = await client.post(
+                f"{self.supabase_url}/auth/v1/token?grant_type=password",
+                json={"email": email, "password": password},
+                headers={
+                    "apikey": self.supabase_anon_key,
+                    "Content-Type": "application/json",
+                },
+            )
+            if resp.status_code != 200:
+                # Put pending back so user can retry
+                self._pending[state] = pending
+                raise ValueError("Invalid email or password")
+            token_data = resp.json()
 
         # Issue our own authorization code
         evie_code = secrets.token_urlsafe(48)
@@ -188,8 +173,8 @@ class SupabaseOAuthProvider(OAuthProvider):
             redirect_uri=pending.redirect_uri,
             code_challenge=pending.code_challenge,
             scopes=pending.scopes,
-            supabase_access_token=access_token,
-            supabase_refresh_token=refresh_token or "",
+            supabase_access_token=token_data["access_token"],
+            supabase_refresh_token=token_data.get("refresh_token", ""),
         )
 
         # Redirect back to Claude.ai with our authorization code
