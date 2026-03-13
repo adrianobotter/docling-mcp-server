@@ -30,7 +30,7 @@ def _create_auth() -> SupabaseOAuthProvider | None:
     if not supabase_url or not supabase_anon_key:
         return None
 
-    base_url = os.environ.get("EVIE_BASE_URL", "https://evie-mcp.railway.app")
+    base_url = os.environ.get("EVIE_BASE_URL", "https://docling-mcp-server-production.up.railway.app")
 
     provider = SupabaseOAuthProvider(
         supabase_url=supabase_url,
