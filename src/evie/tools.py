@@ -9,6 +9,7 @@ from fastmcp.server.auth import AccessToken
 
 from . import db
 from .auth import AuthError, verify_hcp
+from . import _state
 
 
 def _error_response(message: str, code: str = "error") -> str:
@@ -16,9 +17,23 @@ def _error_response(message: str, code: str = "error") -> str:
 
 
 async def _authenticate(access_token: AccessToken | None):
-    """Verify the HCP from the FastMCP-injected access token."""
+    """Verify the HCP from the FastMCP-injected access token.
+
+    The access token from FastMCP is an EVIE-issued token. We look up the
+    corresponding Supabase token to verify the HCP profile.
+    """
     if not access_token:
         raise AuthError("No access token found. Please authenticate via the Evie Connector.", code="no_token")
+
+    # Resolve the Supabase token from the EVIE token
+    provider = _state.oauth_provider
+    if provider:
+        supabase_token = provider.get_supabase_token(access_token.token)
+        if not supabase_token:
+            raise AuthError("Invalid or expired access token.", code="invalid_token")
+        return await verify_hcp(supabase_token)
+
+    # Fallback: use the token directly (no OAuth provider configured)
     return await verify_hcp(access_token.token)
 
 
