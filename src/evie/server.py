@@ -8,11 +8,53 @@ Thin query layer over Supabase — no PDF processing, no ML, no Docling.
 import os
 
 from fastmcp import FastMCP
+from starlette.middleware import Middleware
+from starlette.requests import Request
 from starlette.responses import JSONResponse, RedirectResponse
+from starlette.types import ASGIApp, Receive, Scope, Send
 
 from . import _state
 from .oauth import SupabaseOAuthProvider
 from .tools import register_tools
+
+
+# ─── Bearer token middleware ─────────────────────────────────────────────────
+
+# Paths that skip bearer token validation
+_PUBLIC_PATHS = {"/health"}
+
+
+class BearerTokenMiddleware:
+    """Validate MCP_BEARER_TOKEN on all requests except health checks."""
+
+    def __init__(self, app: ASGIApp, token: str) -> None:
+        self.app = app
+        self.token = token
+
+    async def __call__(self, scope: Scope, receive: Receive, send: Send) -> None:
+        if scope["type"] not in ("http", "websocket"):
+            await self.app(scope, receive, send)
+            return
+
+        path = scope.get("path", "")
+        if path in _PUBLIC_PATHS:
+            await self.app(scope, receive, send)
+            return
+
+        # Extract Authorization header
+        headers = dict(scope.get("headers", []))
+        auth_value = headers.get(b"authorization", b"").decode()
+
+        if not auth_value.startswith("Bearer ") or auth_value[7:] != self.token:
+            response = JSONResponse(
+                {"error": "Unauthorized", "detail": "Valid Bearer token required"},
+                status_code=401,
+                headers={"WWW-Authenticate": "Bearer"},
+            )
+            await response(scope, receive, send)
+            return
+
+        await self.app(scope, receive, send)
 
 
 # ─── Auth (Supabase as identity backend) ─────────────────────────────────────
@@ -151,6 +193,12 @@ def main():
         raise RuntimeError(f"Missing required environment variables: {', '.join(missing)}")
 
     app = mcp.http_app()
+
+    # Wrap with bearer token auth if MCP_BEARER_TOKEN is set
+    bearer_token = os.environ.get("MCP_BEARER_TOKEN")
+    if bearer_token:
+        app = BearerTokenMiddleware(app, bearer_token)
+
     uvicorn.run(app, host=host, port=port)
 
 
