@@ -2,7 +2,7 @@
 EVIE MCP Server
 Governed clinical evidence for HCPs via Claude.ai Connector.
 
-Thin query layer over Supabase — no PDF processing, no ML, no Docling.
+Thin query layer over Supabase — no PDF processing, no ML.
 """
 
 import os
@@ -11,8 +11,11 @@ from fastmcp import FastMCP
 from starlette.responses import HTMLResponse, JSONResponse, RedirectResponse
 
 from . import _state
+from .logging import setup_logging, server_log
 from .oauth import SupabaseOAuthProvider
 from .tools import register_tools
+
+setup_logging()
 
 
 # ─── Auth (Supabase as identity backend) ─────────────────────────────────────
@@ -30,7 +33,7 @@ def _create_auth() -> SupabaseOAuthProvider | None:
     if not supabase_url or not supabase_anon_key:
         return None
 
-    base_url = os.environ.get("EVIE_BASE_URL", "https://docling-mcp-server-production.up.railway.app")
+    base_url = os.environ.get("EVIE_BASE_URL", "https://evie-mcp-server-production.up.railway.app")
 
     provider = SupabaseOAuthProvider(
         supabase_url=supabase_url,
@@ -185,6 +188,7 @@ def main():
     if missing:
         raise RuntimeError(f"Missing required environment variables: {', '.join(missing)}")
 
+    server_log.info("Starting EVIE MCP Server", extra={"event": "server_start", "host": host, "port": port})
     app = mcp.http_app()
     uvicorn.run(app, host=host, port=port)
 

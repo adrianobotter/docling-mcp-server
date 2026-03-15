@@ -1,6 +1,7 @@
 """EVIE MCP Tool definitions — 5 governed clinical evidence tools for HCPs."""
 
 import json
+import time
 from typing import Optional
 
 from fastmcp import FastMCP
@@ -10,6 +11,7 @@ from fastmcp.server.auth import AccessToken
 from . import db
 from .auth import AuthError, verify_hcp
 from . import _state
+from .logging import audit, auth_log
 
 
 def _error_response(message: str, code: str = "error") -> str:
@@ -23,6 +25,7 @@ async def _authenticate(access_token: AccessToken | None):
     corresponding Supabase token to verify the HCP profile.
     """
     if not access_token:
+        auth_log.warning("Tool call with no access token", extra={"event": "auth_fail", "error_code": "no_token"})
         raise AuthError("No access token found. Please authenticate via the Evie Connector.", code="no_token")
 
     # Resolve the Supabase token from the EVIE token
@@ -30,11 +33,16 @@ async def _authenticate(access_token: AccessToken | None):
     if provider:
         supabase_token = provider.get_supabase_token(access_token.token)
         if not supabase_token:
+            auth_log.warning("Invalid EVIE token", extra={"event": "auth_fail", "error_code": "invalid_token"})
             raise AuthError("Invalid or expired access token.", code="invalid_token")
-        return await verify_hcp(supabase_token)
+        hcp = await verify_hcp(supabase_token)
+        auth_log.info("HCP authenticated", extra={"event": "auth_success", "user_id": hcp.user_id})
+        return hcp
 
     # Fallback: use the token directly (no OAuth provider configured)
-    return await verify_hcp(access_token.token)
+    hcp = await verify_hcp(access_token.token)
+    auth_log.info("HCP authenticated (direct)", extra={"event": "auth_success", "user_id": hcp.user_id})
+    return hcp
 
 
 def register_tools(mcp: FastMCP) -> None:
@@ -56,6 +64,7 @@ def register_tools(mcp: FastMCP) -> None:
         Returns a JSON array of trials you can query, including trial name, drug,
         indication, phase, and available evidence types.
         """
+        t0 = time.monotonic()
         try:
             access_token = get_access_token()
             hcp = await _authenticate(access_token)
@@ -64,6 +73,11 @@ def register_tools(mcp: FastMCP) -> None:
 
         client = db.get_client(access_token=hcp.access_token)
         trials = db.list_trials(client)
+        audit.info("list_trials", extra={
+            "event": "tool_call", "tool": "list_trials",
+            "user_id": hcp.user_id, "result_count": len(trials),
+            "duration_ms": int((time.monotonic() - t0) * 1000),
+        })
         return json.dumps([t.model_dump() for t in trials], indent=2)
 
     @mcp.tool(
@@ -86,6 +100,7 @@ def register_tools(mcp: FastMCP) -> None:
         Args:
             trial_id: UUID of the trial to summarize.
         """
+        t0 = time.monotonic()
         try:
             access_token = get_access_token()
             hcp = await _authenticate(access_token)
@@ -96,6 +111,11 @@ def register_tools(mcp: FastMCP) -> None:
         summary = db.get_trial_summary(client, trial_id)
         if not summary:
             return _error_response("Trial not found or not accessible.", "not_found")
+        audit.info("get_trial_summary", extra={
+            "event": "tool_call", "tool": "get_trial_summary",
+            "user_id": hcp.user_id, "trial_id": trial_id,
+            "duration_ms": int((time.monotonic() - t0) * 1000),
+        })
         return json.dumps(summary, indent=2)
 
     @mcp.tool(
@@ -123,6 +143,7 @@ def register_tools(mcp: FastMCP) -> None:
             trial_id: Optional UUID to scope search to a specific trial.
             object_class: Optional filter — 'primary_endpoint', 'subgroup', 'adverse_event', or 'comparator'.
         """
+        t0 = time.monotonic()
         try:
             access_token = get_access_token()
             hcp = await _authenticate(access_token)
@@ -131,6 +152,12 @@ def register_tools(mcp: FastMCP) -> None:
 
         client = db.get_client(access_token=hcp.access_token)
         results = db.search_evidence(client, query, trial_id=trial_id, object_class=object_class)
+        audit.info("get_evidence", extra={
+            "event": "tool_call", "tool": "get_evidence",
+            "user_id": hcp.user_id, "query": query,
+            "trial_id": trial_id, "result_count": len(results),
+            "duration_ms": int((time.monotonic() - t0) * 1000),
+        })
         return json.dumps(
             [r.model_dump() for r in results],
             indent=2,
@@ -156,6 +183,7 @@ def register_tools(mcp: FastMCP) -> None:
         Args:
             evidence_object_id: UUID of the evidence object.
         """
+        t0 = time.monotonic()
         try:
             access_token = get_access_token()
             hcp = await _authenticate(access_token)
@@ -166,6 +194,11 @@ def register_tools(mcp: FastMCP) -> None:
         detail = db.get_evidence_detail(client, evidence_object_id)
         if not detail:
             return _error_response("Evidence object not found or not accessible.", "not_found")
+        audit.info("get_evidence_detail", extra={
+            "event": "tool_call", "tool": "get_evidence_detail",
+            "user_id": hcp.user_id, "evidence_object_id": evidence_object_id,
+            "duration_ms": int((time.monotonic() - t0) * 1000),
+        })
         return json.dumps(detail.model_dump(), indent=2)
 
     @mcp.tool(
@@ -187,6 +220,7 @@ def register_tools(mcp: FastMCP) -> None:
         Args:
             trial_id: UUID of the trial.
         """
+        t0 = time.monotonic()
         try:
             access_token = get_access_token()
             hcp = await _authenticate(access_token)
@@ -200,6 +234,12 @@ def register_tools(mcp: FastMCP) -> None:
                 "No safety data found for this trial or not accessible.",
                 "not_found",
             )
+        audit.info("get_safety_data", extra={
+            "event": "tool_call", "tool": "get_safety_data",
+            "user_id": hcp.user_id, "trial_id": trial_id,
+            "result_count": len(results),
+            "duration_ms": int((time.monotonic() - t0) * 1000),
+        })
         return json.dumps(
             [r.model_dump() for r in results],
             indent=2,
